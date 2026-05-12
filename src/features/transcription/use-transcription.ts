@@ -13,6 +13,9 @@ export function useTranscription() {
   const [progress, setProgress] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [backend, setBackend] = useState<InferenceBackend>('webgpu');
+  const [modelName, setModelName] = useState<string>('None');
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [lastDurationMs, setLastDurationMs] = useState<number | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
   const streamControllerRef = useRef<AudioStreamController | null>(null);
@@ -25,24 +28,30 @@ export function useTranscription() {
     );
 
     workerRef.current.onmessage = (event) => {
-      const { type, payload, status: workerStatus, isPartial, backend: workerBackend } = event.data;
+      const {
+        type, payload, status: workerStatus, isPartial,
+        backend: workerBackend, modelName: workerModelName,
+        durationMs, audioSeconds,
+      } = event.data;
 
       switch (type) {
         case 'STATUS':
           setStatus(workerStatus);
-          if (workerBackend) {
-            setBackend(workerBackend);
-          }
+          if (workerBackend) setBackend(workerBackend);
+          if (workerModelName) setModelName(workerModelName);
+          break;
+        case 'PROCESSING':
+          setIsProcessing(payload);
           break;
         case 'PROGRESS':
           setProgress(payload);
           break;
         case 'TRANSCRIPT':
+          if (durationMs) setLastDurationMs(durationMs);
           if (isPartial) {
             setPartialTranscript(payload);
           } else {
             setTranscript((prev) => {
-              // Avoid duplicate adjacent text
               if (prev.endsWith(payload)) return prev;
               return prev + (prev && !prev.endsWith(' ') ? ' ' : '') + payload;
             });
@@ -105,6 +114,9 @@ export function useTranscription() {
     progress,
     error,
     backend,
+    modelName,
+    isProcessing,
+    lastDurationMs,
     loadModel,
     startRecording,
     stopRecording,

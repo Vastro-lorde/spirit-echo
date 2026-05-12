@@ -17,6 +17,9 @@ export function TranscriptionDashboard() {
     progress,
     error,
     backend,
+    modelName,
+    isProcessing,
+    lastDurationMs,
     loadModel,
     startRecording,
     stopRecording,
@@ -78,6 +81,14 @@ export function TranscriptionDashboard() {
         </div>
 
         <div className="flex items-center gap-4">
+          {/* Model name badge */}
+          {status !== 'idle' && modelName !== 'None' && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border bg-white/5 border-white/10 text-gray-400">
+              <Sparkles className="w-3 h-3 text-indigo-400" />
+              <span>{modelName}</span>
+            </div>
+          )}
+
           {/* Backend indicator */}
           {status !== 'idle' && (
             <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border ${
@@ -87,6 +98,14 @@ export function TranscriptionDashboard() {
             }`}>
               <BackendIcon className="w-3 h-3" />
               <span>{BACKEND_LABELS[backend]}</span>
+            </div>
+          )}
+
+          {/* Processing indicator */}
+          {isProcessing && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-purple-500/10 text-purple-400 border border-purple-500/30">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              <span>Transcribing{lastDurationMs ? ` (${lastDurationMs}ms)` : '...'}</span>
             </div>
           )}
 
@@ -152,10 +171,16 @@ export function TranscriptionDashboard() {
         className="relative flex-1 min-h-[400px] bg-black/40 backdrop-blur-xl border border-white/10 rounded-3xl shadow-2xl overflow-hidden flex flex-col"
       >
         <div className="p-4 border-b border-white/10 flex justify-between items-center bg-white/5">
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${status === 'recording' ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`} />
+          <div className="flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full ${
+              status === 'recording'
+                ? isProcessing ? 'bg-purple-500 animate-pulse' : 'bg-red-500 animate-pulse'
+                : 'bg-gray-500'
+            }`} />
             <span className="text-xs font-medium text-gray-400 tracking-wider uppercase">
-              {status === 'recording' ? 'Live Transcript' : 'Transcript Output'}
+              {status === 'recording'
+                ? isProcessing ? 'Transcribing...' : 'Listening...'
+                : 'Transcript Output'}
             </span>
           </div>
           

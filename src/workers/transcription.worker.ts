@@ -10,14 +10,14 @@ import type { InferenceBackend } from '../core/entities';
 // ─── Constants ──────────────────────────────────────────────────────
 
 const SAMPLE_RATE = 16000;
-/** Transcribe every 1 second of new audio (16000 samples). */
-const CHUNK_SIZE_SAMPLES = SAMPLE_RATE;
+/** Transcribe every ~1.5s of new audio for better context chunks. */
+const CHUNK_SIZE_SAMPLES = Math.round(SAMPLE_RATE * 1.5);
 /** Maximum buffer duration before forced commit (~30s, Whisper context limit). */
 const MAX_BUFFER_DURATION_S = 25;
 const MAX_BUFFER_SAMPLES = SAMPLE_RATE * MAX_BUFFER_DURATION_S;
 /** How long (ms) of continuous silence before committing the current partial. */
-const SILENCE_COMMIT_MS = 2000;
-const SILENCE_COMMIT_SAMPLES = (SILENCE_COMMIT_MS / 1000) * SAMPLE_RATE;
+const SILENCE_COMMIT_MS = 2500;
+const SILENCE_COMMIT_SAMPLES = Math.round((SILENCE_COMMIT_MS / 1000) * SAMPLE_RATE);
 /** Maximum retries for a failed transcription call. */
 const MAX_RETRIES = 3;
 
@@ -30,6 +30,7 @@ let lastTranscriptionSampleIdx = 0;
 let consecutiveSilenceSamples = 0;
 let currentBackend: InferenceBackend = 'webgpu';
 let isProcessing = false;
+let transcriptionCount = 0;
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -80,19 +81,37 @@ async function handleStart(): Promise<void> {
   try {
     postMsg({ type: 'STATUS', status: 'loading' });
 
+    // Load Whisper Base (good balance of speed and accuracy)
     transcriber = await WhisperBinding.getInstance((info: any) => {
       postMsg({ type: 'PROGRESS', payload: info });
-    });
+    }, 'base');
 
     // Detect which backend actually loaded
     currentBackend = detectLoadedBackend();
-    vad = new VoiceActivityDetector({ debug: false }, SAMPLE_RATE);
+    const modelName = WhisperBinding.getCurrentModelName();
+
+    // Initialize VAD with slightly more sensitive threshold for quiet speech
+    vad = new VoiceActivityDetector(
+      {
+        energyThreshold: 0.005,  // Lower = more sensitive (was 0.01)
+        speechStartPaddingMs: 150,
+        speechEndPaddingMs: 800,
+        debug: true,  // Enable VAD logging for diagnostics
+      },
+      SAMPLE_RATE,
+    );
     resetAudioState();
+    transcriptionCount = 0;
+
+    console.log(
+      `[transcription.worker] Ready — model: ${modelName}, backend: ${currentBackend}`,
+    );
 
     postMsg({
       type: 'STATUS',
       status: 'ready',
       backend: currentBackend,
+      modelName,
     });
   } catch (error) {
     console.error('[transcription.worker] Error loading whisper model:', error);
@@ -157,16 +176,37 @@ function isBufferCommit(silenceCommit: boolean, bufferFull: boolean): boolean {
 async function transcribeCurrent(commit: boolean): Promise<void> {
   if (isProcessing || audioBuffer.length === 0) return;
   isProcessing = true;
+  transcriptionCount++;
+
+  const audioDurationS = (audioBuffer.length / SAMPLE_RATE).toFixed(1);
+  const startedAt = performance.now();
+
+  // Notify UI that Whisper is actively processing
+  postMsg({ type: 'PROCESSING', payload: true });
+
+  console.log(
+    `[transcription.worker] #${transcriptionCount} Transcribing ${audioDurationS}s of audio` +
+    (commit ? ' (commit)' : ' (partial)'),
+  );
 
   try {
     const result = await transcribeWithRetry(audioBuffer);
     lastTranscriptionSampleIdx = audioBuffer.length;
+
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    console.log(
+      `[transcription.worker] #${transcriptionCount} Done in ${elapsedMs}ms` +
+      ` — "${result?.text?.slice(0, 60)}${(result?.text?.length ?? 0) > 60 ? '...' : ''}"`,
+    );
 
     if (result) {
       postMsg({
         type: 'TRANSCRIPT',
         payload: result.text,
         isPartial: !commit,
+        index: transcriptionCount,
+        durationMs: elapsedMs,
+        audioSeconds: parseFloat(audioDurationS),
       });
     }
 
@@ -185,6 +225,7 @@ async function transcribeCurrent(commit: boolean): Promise<void> {
     });
   } finally {
     isProcessing = false;
+    postMsg({ type: 'PROCESSING', payload: false });
   }
 }
 

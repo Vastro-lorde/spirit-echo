@@ -1,7 +1,9 @@
-// ─── Gemma Model Binding ────────────────────────────────────────────
-// Loads Google Gemma (or any compatible text-generation model) via
+// ─── LLM Analysis Binding ───────────────────────────────────────────
+// Loads Gemma 3 270M (ONNX-converted, public, no auth required) via
 // HuggingFace Transformers.js for on-device post-transcription intelligence.
 // Supports summarization, Q&A, and action-item extraction.
+//
+// Model: onnx-community/gemma-3-270m-it-ONNX (~300MB q4, license: gemma)
 
 import { pipeline, env } from '@huggingface/transformers';
 
@@ -30,22 +32,22 @@ export interface GemmaConfig {
   topP: number;
 }
 
-/** Default configuration using Gemma 2 2B Instruct (Xenova-converted). */
+/** Default configuration using Gemma 3 270M Instruct ONNX (public, no auth required). */
 export const DEFAULT_GEMMA_CONFIG: GemmaConfig = {
-  modelId: 'Xenova/gemma-2-2b-it',
+  modelId: 'onnx-community/gemma-3-270m-it-ONNX',
   maxNewTokens: 256,
   temperature: 0.3,
   topP: 0.9,
 };
 
-/** Prompt templates for each analysis task. */
+/** Prompt templates for each analysis task (Gemma 3 instruct format). */
 const TASK_PROMPTS: Record<GemmaTask, (transcript: string) => string> = {
   summarize: (t) =>
-    `<start_of_turn>user\nSummarize the following transcript concisely in 3-5 bullet points:\n\n${t}\n<end_of_turn>\n<start_of_turn>model\n`,
+    `<bos><start_of_turn>user\nSummarize the following transcript concisely in 3-5 bullet points:\n\n${t}<end_of_turn>\n<start_of_turn>model\n`,
   'extract-actions': (t) =>
-    `<start_of_turn>user\nExtract all action items, tasks, and decisions from this transcript. Output as a bulleted list:\n\n${t}\n<end_of_turn>\n<start_of_turn>model\n`,
+    `<bos><start_of_turn>user\nExtract all action items, tasks, and decisions from this transcript. Output as a bulleted list:\n\n${t}<end_of_turn>\n<start_of_turn>model\n`,
   qa: (t) =>
-    `<start_of_turn>user\nAnswer the following question based on the transcript below. If the answer is not in the transcript, say so.\n\nTranscript:\n${t}\n<end_of_turn>\n<start_of_turn>model\n`,
+    `<bos><start_of_turn>user\nAnswer the following question based on the transcript below. If the answer is not in the transcript, say so.\n\nTranscript:\n${t}<end_of_turn>\n<start_of_turn>model\n`,
 };
 
 export class GemmaBinding {
@@ -72,10 +74,19 @@ export class GemmaBinding {
     }
 
     if (!this.instance) {
-      this.instance = await pipeline('text-generation', this.config.modelId, {
-        progress_callback: progressCallback,
-        device: 'webgpu',
-      });
+      // Try WebGPU first; fall back to WASM if not supported or model lacks GPU files
+      try {
+        this.instance = await pipeline('text-generation', this.config.modelId, {
+          progress_callback: progressCallback,
+          device: 'webgpu',
+        });
+      } catch {
+        console.warn('[GemmaBinding] WebGPU unavailable, falling back to WASM');
+        this.instance = await pipeline('text-generation', this.config.modelId, {
+          progress_callback: progressCallback,
+          device: 'wasm',
+        });
+      }
       this.currentModelId = this.config.modelId;
     }
     return this.instance;
@@ -98,10 +109,7 @@ export class GemmaBinding {
 
     let prompt: string;
     if (task === 'qa' && question) {
-      prompt = TASK_PROMPTS.qa(transcript).replace(
-        'Answer the following question',
-        `Question: ${question}\n\nAnswer`,
-      );
+      prompt = `<bos><start_of_turn>user\nAnswer the following question based on the transcript below. If the answer is not in the transcript, say so.\n\nTranscript:\n${transcript}\n\nQuestion: ${question}<end_of_turn>\n<start_of_turn>model\n`;
     } else {
       prompt = TASK_PROMPTS[task](transcript);
     }
@@ -114,11 +122,16 @@ export class GemmaBinding {
 
     const durationMs = Math.round(performance.now() - startedAt);
 
-    // Extract generated text (first output's generated_text minus the prompt)
-    const raw = (outputs as any)[0]?.generated_text ?? '';
-    const result = raw.replace(prompt, '').trim();
+    // Extract generated text — Gemma 3 returns 0th element's generated_text
+    const raw: string = (outputs as any)[0]?.generated_text ?? '';
 
-    return { task, result, durationMs };
+    // Strip the prompt to get just the response
+    const result = raw.startsWith(prompt) ? raw.slice(prompt.length).trim() : raw.trim();
+
+    // Strip trailing <end_of_turn> and any trailing <eos>
+    const cleaned = result.replace(/<end_of_turn>\s*$/, '').replace(/<eos>\s*$/, '').trim();
+
+    return { task, result: cleaned, durationMs };
   }
 
   /**

@@ -1,10 +1,13 @@
 class AudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
+    // Log the actual sample rate the worklet is running at
+    console.log(`[AudioWorklet] Processor created — sampleRate: ${sampleRate}Hz`);
     // Use a buffer to collect chunks of audio data to send to the main thread
     this.bufferSize = 4096;
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
+    this.chunkCount = 0;
   }
 
   process(inputs, outputs, parameters) {
@@ -16,11 +19,12 @@ class AudioProcessor extends AudioWorkletProcessor {
         this.bufferIndex++;
 
         if (this.bufferIndex >= this.bufferSize) {
-          // Send the chunk to the main thread
-          this.port.postMessage(this.buffer);
-          // Create a new buffer to avoid transferring issues
+          // Transfer ownership of the buffer for zero-copy
+          this.port.postMessage(this.buffer, [this.buffer.buffer]);
+          // Create a new buffer
           this.buffer = new Float32Array(this.bufferSize);
           this.bufferIndex = 0;
+          this.chunkCount++;
         }
       }
     }

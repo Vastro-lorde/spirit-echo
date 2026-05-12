@@ -18,10 +18,10 @@ const AVAILABLE_MODELS: Omit<ModelConfig, 'cacheStatus' | 'backend' | 'isLoaded'
     sizeBytes: 142 * 1024 * 1024, // ~142MB
   },
   {
-    modelId: 'Xenova/gemma-2-2b-it',
-    displayName: 'Gemma 2 2B Instruct',
+    modelId: 'onnx-community/gemma-3-270m-it-ONNX',
+    displayName: 'Gemma 3 270M Instruct',
     task: 'text-generation',
-    sizeBytes: 2.6 * 1024 * 1024 * 1024, // ~2.6GB
+    sizeBytes: 300 * 1024 * 1024, // ~300MB q4
   },
   {
     modelId: 'Xenova/all-MiniLM-L6-v2',
@@ -38,13 +38,34 @@ async function getCachedModels(): Promise<Set<string>> {
   try {
     const root = await navigator.storage.getDirectory();
     const cached = new Set<string>();
-    // Transformers.js stores models under a specific path structure
-    // We check if the directory exists as a heuristic for "cached"
-    for await (const [name] of (root as any).entries()) {
-      if (name.includes('transformers') || name.includes('onnx') || name.includes('Xenova')) {
-        cached.add(name);
+
+    // Transformers.js v3+ caches models under OPFS at:
+    //   transformers-cache/<org>/<model-name>/
+    // We traverse that structure to build a set of "org/model" IDs.
+    let cacheDir: FileSystemDirectoryHandle | null = null;
+    try {
+      cacheDir = await (root as any).getDirectoryHandle('transformers-cache');
+    } catch {
+      // Fallback: scan root for any directory that looks like the cache root
+      for await (const [name, handle] of (root as any).entries()) {
+        if ((handle as any).kind === 'directory' && name.toLowerCase().includes('transformers')) {
+          cacheDir = handle as FileSystemDirectoryHandle;
+          break;
+        }
       }
     }
+
+    if (cacheDir) {
+      for await (const [orgName, orgHandle] of (cacheDir as any).entries()) {
+        if ((orgHandle as any).kind !== 'directory') continue;
+        for await (const [modelName, modelHandle] of (orgHandle as any).entries()) {
+          if ((modelHandle as any).kind === 'directory') {
+            cached.add(`${orgName}/${modelName}`);
+          }
+        }
+      }
+    }
+
     return cached;
   } catch {
     return new Set();
@@ -63,8 +84,18 @@ async function getCacheSize(): Promise<number> {
 async function clearModelCache(modelId: string): Promise<void> {
   try {
     const root = await navigator.storage.getDirectory();
-    const modelDir = modelId.replace(/\//g, '_');
-    await root.removeEntry(modelDir, { recursive: true }).catch(() => {
+    let cacheDir: FileSystemDirectoryHandle | null = null;
+    try {
+      cacheDir = await (root as any).getDirectoryHandle('transformers-cache');
+    } catch {
+      return;
+    }
+    const parts = modelId.split('/');
+    const orgName = parts[0];
+    const modelName = parts.slice(1).join('/');
+    const orgDir = await (cacheDir as any).getDirectoryHandle(orgName).catch(() => null);
+    if (!orgDir) return;
+    await (orgDir as any).removeEntry(modelName, { recursive: true }).catch(() => {
       // Directory may not exist, ignore
     });
   } catch {
@@ -90,7 +121,7 @@ export function useModelManager() {
 
       const withStatus: ModelConfig[] = AVAILABLE_MODELS.map((m) => ({
         ...m,
-        cacheStatus: cached.has(m.modelId.replace(/\//g, '_')) ? 'cached' as ModelCacheStatus : 'not-downloaded' as ModelCacheStatus,
+        cacheStatus: cached.has(m.modelId) ? 'cached' as ModelCacheStatus : 'not-downloaded' as ModelCacheStatus,
         backend: be,
         isLoaded: false,
       }));
